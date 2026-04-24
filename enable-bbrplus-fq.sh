@@ -60,8 +60,22 @@ NIC="$(ip route show default | awk '/default/ {print $5; exit}')"
 [[ -n "${NIC}" ]] || die "failed to detect the default network interface"
 
 AVAILABLE_CC="$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || true)"
+if ! grep -qw 'bbrplus' <<<"${AVAILABLE_CC}" && command -v modprobe >/dev/null 2>&1; then
+  modprobe tcp_bbrplus 2>/dev/null || true
+  modprobe sch_fq 2>/dev/null || true
+  AVAILABLE_CC="$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || true)"
+fi
+
 if ! grep -qw 'bbrplus' <<<"${AVAILABLE_CC}"; then
-  die "bbrplus is not available on the current kernel; install or boot the BBRplus kernel first"
+  CURRENT_KERNEL="$(uname -r 2>/dev/null || echo unknown)"
+  if grep -qi 'bbrplus' <<<"${CURRENT_KERNEL}"; then
+    die "running kernel ${CURRENT_KERNEL} still does not expose bbrplus; try 'modprobe tcp_bbrplus' and check dmesg"
+  fi
+  die "bbrplus is not available on the current kernel (${CURRENT_KERNEL}); install or boot the BBRplus kernel first"
+fi
+
+if command -v modprobe >/dev/null 2>&1; then
+  modprobe sch_fq 2>/dev/null || true
 fi
 
 cat >/etc/sysctl.d/99-bbrplus-fq.conf <<'EOF'
