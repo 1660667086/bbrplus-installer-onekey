@@ -4,6 +4,14 @@ set -euo pipefail
 
 AUTO_REBOOT=0
 SCRIPT_NAME="$(basename "$0")"
+APT_UPDATED=0
+APT_OPTS=(
+  -o Acquire::Retries=3
+  -o Acquire::http::Timeout=10
+  -o Acquire::https::Timeout=10
+  -o Dpkg::Options::=--force-confdef
+  -o Dpkg::Options::=--force-confold
+)
 
 log() {
   printf '[%s] %s\n' "$SCRIPT_NAME" "$*"
@@ -12,6 +20,51 @@ log() {
 die() {
   printf '[%s] ERROR: %s\n' "$SCRIPT_NAME" "$*" >&2
   exit 1
+}
+
+package_installed() {
+  dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q 'install ok installed'
+}
+
+apt_update_once() {
+  if [[ "${APT_UPDATED}" -eq 1 ]]; then
+    return
+  fi
+
+  log "updating apt cache once because a required package is missing"
+  DEBIAN_FRONTEND=noninteractive apt-get "${APT_OPTS[@]}" update -y
+  APT_UPDATED=1
+}
+
+apt_install_missing() {
+  local missing=()
+  local pkg
+
+  for pkg in "$@"; do
+    if ! package_installed "${pkg}"; then
+      missing+=("${pkg}")
+    fi
+  done
+
+  if [[ "${#missing[@]}" -eq 0 ]]; then
+    log "required apt packages already installed; skipping apt update"
+    return
+  fi
+
+  command -v apt-get >/dev/null 2>&1 || die "apt-get is required to install: ${missing[*]}"
+  apt_update_once
+  log "installing missing apt packages: ${missing[*]}"
+  DEBIAN_FRONTEND=noninteractive apt-get "${APT_OPTS[@]}" install -y "${missing[@]}"
+}
+
+ensure_iproute2() {
+  if command -v ip >/dev/null 2>&1 && command -v tc >/dev/null 2>&1; then
+    return
+  fi
+
+  apt_install_missing iproute2
+  command -v ip >/dev/null 2>&1 || die "ip is still missing after installing iproute2"
+  command -v tc >/dev/null 2>&1 || die "tc is still missing after installing iproute2"
 }
 
 usage() {
@@ -53,8 +106,7 @@ done
 
 [[ "${EUID}" -eq 0 ]] || die "please run as root"
 command -v sysctl >/dev/null 2>&1 || die "sysctl is required"
-command -v ip >/dev/null 2>&1 || die "ip is required"
-command -v tc >/dev/null 2>&1 || die "tc is required"
+ensure_iproute2
 
 NIC="$(ip route show default | awk '/default/ {print $5; exit}')"
 [[ -n "${NIC}" ]] || die "failed to detect the default network interface"

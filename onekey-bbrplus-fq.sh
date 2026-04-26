@@ -6,6 +6,14 @@ RAW_BASE="${RAW_BASE:-https://raw.githubusercontent.com/1660667086/bbrplus-insta
 AUTO_REBOOT=0
 SCRIPT_NAME="$(basename "$0")"
 INSTALL_ARGS=()
+APT_UPDATED=0
+APT_OPTS=(
+  -o Acquire::Retries=3
+  -o Acquire::http::Timeout=10
+  -o Acquire::https::Timeout=10
+  -o Dpkg::Options::=--force-confdef
+  -o Dpkg::Options::=--force-confold
+)
 
 log() {
   printf '[%s] %s\n' "$SCRIPT_NAME" "$*"
@@ -14,6 +22,41 @@ log() {
 die() {
   printf '[%s] ERROR: %s\n' "$SCRIPT_NAME" "$*" >&2
   exit 1
+}
+
+package_installed() {
+  dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q 'install ok installed'
+}
+
+apt_update_once() {
+  if [[ "${APT_UPDATED}" -eq 1 ]]; then
+    return
+  fi
+
+  log "updating apt cache once because a required package is missing"
+  DEBIAN_FRONTEND=noninteractive apt-get "${APT_OPTS[@]}" update -y
+  APT_UPDATED=1
+}
+
+apt_install_missing() {
+  local missing=()
+  local pkg
+
+  for pkg in "$@"; do
+    if ! package_installed "${pkg}"; then
+      missing+=("${pkg}")
+    fi
+  done
+
+  if [[ "${#missing[@]}" -eq 0 ]]; then
+    log "required apt packages already installed; skipping apt update"
+    return
+  fi
+
+  command -v apt-get >/dev/null 2>&1 || die "apt-get is required to install: ${missing[*]}"
+  apt_update_once
+  log "installing missing apt packages: ${missing[*]}"
+  DEBIAN_FRONTEND=noninteractive apt-get "${APT_OPTS[@]}" install -y "${missing[@]}"
 }
 
 usage() {
@@ -69,10 +112,9 @@ ensure_iproute2() {
     return
   fi
 
-  command -v apt-get >/dev/null 2>&1 || die "iproute2 is required, and apt-get is not available to install it"
-  log "installing iproute2 for ip/tc commands"
-  apt-get update -y
-  apt-get install -y iproute2
+  apt_install_missing iproute2
+  command -v ip >/dev/null 2>&1 || die "ip is still missing after installing iproute2"
+  command -v tc >/dev/null 2>&1 || die "tc is still missing after installing iproute2"
 }
 
 bbrplus_available() {
@@ -106,11 +148,52 @@ log() {
   printf '[bbrplus-fq-finalize] %s\n' "$*"
 }
 
-if ! command -v ip >/dev/null 2>&1 || ! command -v tc >/dev/null 2>&1; then
-  if command -v apt-get >/dev/null 2>&1; then
-    apt-get update -y
-    apt-get install -y iproute2
+APT_UPDATED=0
+APT_OPTS=(
+  -o Acquire::Retries=3
+  -o Acquire::http::Timeout=10
+  -o Acquire::https::Timeout=10
+  -o Dpkg::Options::=--force-confdef
+  -o Dpkg::Options::=--force-confold
+)
+
+package_installed() {
+  dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q 'install ok installed'
+}
+
+apt_update_once() {
+  if [[ "${APT_UPDATED}" -eq 1 ]]; then
+    return
   fi
+
+  log "updating apt cache once because a required package is missing"
+  DEBIAN_FRONTEND=noninteractive apt-get "${APT_OPTS[@]}" update -y
+  APT_UPDATED=1
+}
+
+apt_install_missing() {
+  local missing=()
+  local pkg
+
+  for pkg in "$@"; do
+    if ! package_installed "${pkg}"; then
+      missing+=("${pkg}")
+    fi
+  done
+
+  if [[ "${#missing[@]}" -eq 0 ]]; then
+    log "required apt packages already installed; skipping apt update"
+    return
+  fi
+
+  command -v apt-get >/dev/null 2>&1 || return 1
+  apt_update_once
+  log "installing missing apt packages: ${missing[*]}"
+  DEBIAN_FRONTEND=noninteractive apt-get "${APT_OPTS[@]}" install -y "${missing[@]}"
+}
+
+if ! command -v ip >/dev/null 2>&1 || ! command -v tc >/dev/null 2>&1; then
+  apt_install_missing iproute2 || true
 fi
 
 if command -v modprobe >/dev/null 2>&1; then

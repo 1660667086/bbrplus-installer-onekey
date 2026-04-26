@@ -8,6 +8,14 @@ KEEP_DOWNLOADS=0
 RELEASE_TAG=""
 SCRIPT_NAME="$(basename "$0")"
 WORKDIR=""
+APT_UPDATED=0
+APT_OPTS=(
+  -o Acquire::Retries=3
+  -o Acquire::http::Timeout=10
+  -o Acquire::https::Timeout=10
+  -o Dpkg::Options::=--force-confdef
+  -o Dpkg::Options::=--force-confold
+)
 
 log() {
   printf '[%s] %s\n' "$SCRIPT_NAME" "$*"
@@ -16,6 +24,49 @@ log() {
 die() {
   printf '[%s] ERROR: %s\n' "$SCRIPT_NAME" "$*" >&2
   exit 1
+}
+
+package_installed() {
+  dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q 'install ok installed'
+}
+
+apt_update_once() {
+  if [[ "${APT_UPDATED}" -eq 1 ]]; then
+    return
+  fi
+
+  log "updating apt cache once because a required package is missing"
+  DEBIAN_FRONTEND=noninteractive apt-get "${APT_OPTS[@]}" update -y
+  APT_UPDATED=1
+}
+
+apt_install_missing() {
+  local missing=()
+  local pkg
+
+  for pkg in "$@"; do
+    if ! package_installed "${pkg}"; then
+      missing+=("${pkg}")
+    fi
+  done
+
+  if [[ "${#missing[@]}" -eq 0 ]]; then
+    log "required apt packages already installed; skipping apt update"
+    return
+  fi
+
+  apt_update_once
+  log "installing missing apt packages: ${missing[*]}"
+  DEBIAN_FRONTEND=noninteractive apt-get "${APT_OPTS[@]}" install -y "${missing[@]}"
+}
+
+ensure_ca_certificates() {
+  if [[ -s /etc/ssl/certs/ca-certificates.crt ]]; then
+    log "CA certificate bundle already present; skipping apt update"
+    return
+  fi
+
+  apt_install_missing ca-certificates
 }
 
 usage() {
@@ -116,8 +167,7 @@ esac
 CURRENT_KERNEL="$(uname -r)"
 log "detected ${PRETTY_NAME:-$ID} on ${ARCH}, current kernel: ${CURRENT_KERNEL}"
 
-apt-get update -y
-apt-get install -y ca-certificates curl
+ensure_ca_certificates
 
 if [[ -z "${RELEASE_TAG}" ]]; then
   log "querying latest BBRplus release from ${REPO}"
@@ -159,7 +209,10 @@ net.ipv4.tcp_congestion_control = bbrplus
 EOF
 
 log "installing BBRplus kernel packages"
-dpkg -i "${WORKDIR}/${HEADERS_ASSET}" "${WORKDIR}/${IMAGE_ASSET}" || apt-get install -f -y
+dpkg -i "${WORKDIR}/${HEADERS_ASSET}" "${WORKDIR}/${IMAGE_ASSET}" || {
+  apt_update_once
+  DEBIAN_FRONTEND=noninteractive apt-get "${APT_OPTS[@]}" install -f -y
+}
 
 if command -v update-grub >/dev/null 2>&1; then
   update-grub
