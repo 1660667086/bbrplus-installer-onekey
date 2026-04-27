@@ -69,6 +69,89 @@ ensure_ca_certificates() {
   apt_install_missing ca-certificates
 }
 
+run_grub_update() {
+  if command -v update-grub >/dev/null 2>&1; then
+    update-grub
+  elif command -v grub-mkconfig >/dev/null 2>&1; then
+    grub-mkconfig -o /boot/grub/grub.cfg
+  elif command -v grub2-mkconfig >/dev/null 2>&1; then
+    grub2-mkconfig -o /boot/grub2/grub.cfg
+  else
+    return 1
+  fi
+}
+
+find_grub_menu_entry() {
+  local cfg="/boot/grub/grub.cfg"
+  local line submenu title
+
+  [[ -r "${cfg}" ]] || return 1
+
+  while IFS= read -r line; do
+    if [[ "${line}" == *"submenu '"* ]]; then
+      submenu="$(sed -n "s/^[[:space:]]*submenu '\([^']*\)'.*/\1/p" <<<"${line}" | head -n1)"
+      continue
+    fi
+
+    if [[ "${line}" == *"menuentry '"* && "${line}" == *"${VERSION}"* ]]; then
+      title="$(sed -n "s/^[[:space:]]*menuentry '\([^']*\)'.*/\1/p" <<<"${line}" | head -n1)"
+      [[ -n "${title}" ]] || continue
+
+      if [[ -n "${submenu}" ]]; then
+        printf '%s>%s\n' "${submenu}" "${title}"
+      else
+        printf '%s\n' "${title}"
+      fi
+      return 0
+    fi
+  done <"${cfg}"
+
+  return 1
+}
+
+set_grub_default_saved() {
+  local grub_defaults="/etc/default/grub"
+  local backup
+
+  [[ -f "${grub_defaults}" ]] || return 0
+  grep -Eq '^GRUB_DEFAULT="?saved"?$' "${grub_defaults}" && return 0
+
+  backup="${grub_defaults}.bbrplus-backup-$(date +%Y%m%d-%H%M%S)"
+  cp "${grub_defaults}" "${backup}"
+
+  if grep -q '^GRUB_DEFAULT=' "${grub_defaults}"; then
+    sed -i 's/^GRUB_DEFAULT=.*/GRUB_DEFAULT=saved/' "${grub_defaults}"
+  else
+    printf '\nGRUB_DEFAULT=saved\n' >>"${grub_defaults}"
+  fi
+
+  log "configured GRUB_DEFAULT=saved (backup: ${backup})"
+}
+
+configure_bbrplus_grub_default() {
+  local entry
+
+  command -v grub-set-default >/dev/null 2>&1 || {
+    log "grub-set-default not found; cannot set BBRplus as the saved default boot entry"
+    return
+  }
+
+  set_grub_default_saved
+  run_grub_update || {
+    log "could not regenerate GRUB config after setting GRUB_DEFAULT=saved"
+    return
+  }
+
+  entry="$(find_grub_menu_entry || true)"
+  if [[ -z "${entry}" ]]; then
+    log "could not find a GRUB menu entry for ${VERSION}; check /boot/grub/grub.cfg manually"
+    return
+  fi
+
+  grub-set-default "${entry}"
+  log "set BBRplus kernel as saved GRUB default: ${entry}"
+}
+
 usage() {
   cat <<'EOF'
 Usage:
@@ -214,13 +297,11 @@ dpkg -i "${WORKDIR}/${HEADERS_ASSET}" "${WORKDIR}/${IMAGE_ASSET}" || {
   DEBIAN_FRONTEND=noninteractive apt-get "${APT_OPTS[@]}" install -f -y
 }
 
-if command -v update-grub >/dev/null 2>&1; then
-  update-grub
-elif command -v grub-mkconfig >/dev/null 2>&1; then
-  grub-mkconfig -o /boot/grub/grub.cfg
-elif command -v grub2-mkconfig >/dev/null 2>&1; then
-  grub2-mkconfig -o /boot/grub2/grub.cfg
+if ! run_grub_update; then
+  log "could not regenerate GRUB config automatically"
 fi
+
+configure_bbrplus_grub_default
 
 if sysctl net.ipv4.tcp_available_congestion_control 2>/dev/null | grep -qw bbrplus; then
   log "bbrplus is already available on the running kernel; applying sysctl now"

@@ -49,3 +49,4 @@ lsmod | grep bbr
 - Machines with `Secure Boot` enabled are not recommended for unsigned third-party kernels
 - On multi-queue NICs, `tc qdisc show` may still display `mq` as the root qdisc; that does not necessarily mean `fq` is inactive
 - The scripts skip `apt-get update` when required packages are already installed; if a package is missing, apt runs once with retry and timeout options
+- After installing the kernel, the installer sets the BBRplus GRUB entry as the saved default boot option when GRUB tools are available
