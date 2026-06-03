@@ -5,6 +5,7 @@ set -euo pipefail
 REPO="UJX6N/bbrplus-6.x_stable"
 AUTO_REBOOT=0
 KEEP_DOWNLOADS=0
+FORCE_THIRD_PARTY_KERNEL=0
 RELEASE_TAG=""
 SCRIPT_NAME="$(basename "$0")"
 WORKDIR=""
@@ -152,15 +153,53 @@ configure_bbrplus_grub_default() {
   log "set BBRplus kernel as saved GRUB default: ${entry}"
 }
 
+is_guarded_ubuntu_lts() {
+  [[ "${ID:-}" == "ubuntu" ]] || return 1
+
+  case "${VERSION_ID:-}" in
+    22.04|24.04)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+guard_unsafe_ubuntu_kernel_replacement() {
+  if [[ "${FORCE_THIRD_PARTY_KERNEL}" -eq 1 ]]; then
+    return
+  fi
+
+  if ! is_guarded_ubuntu_lts; then
+    return
+  fi
+
+  cat >&2 <<EOF
+[${SCRIPT_NAME}] ERROR: ${PRETTY_NAME:-Ubuntu ${VERSION_ID}} detected.
+
+This script would replace the stock/cloud Ubuntu kernel with an unsigned
+third-party BBRplus kernel. On Ubuntu 22.04/24.04 VPS images this has caused
+machines to become unreachable after reboot.
+
+Use enable-bbr-fq.sh for the safe built-in BBR + fq path, or rerun with
+--force-third-party-kernel only when you have console/rollback access and
+accept the boot/network risk.
+EOF
+  exit 1
+}
+
 usage() {
   cat <<'EOF'
 Usage:
-  install-bbrplus.sh [--auto-reboot] [--tag <release-tag>] [--keep-downloads]
+  install-bbrplus.sh [--auto-reboot] [--tag <release-tag>] [--keep-downloads] [--force-third-party-kernel]
 
 Options:
   --auto-reboot    Reboot automatically after installation completes.
   --tag <tag>      Install a specific release tag, e.g. 6.7.9-bbrplus.
   --keep-downloads Keep downloaded .deb packages in the temp directory.
+  --force-third-party-kernel
+                   Allow third-party kernel replacement on guarded Ubuntu LTS releases.
   -h, --help       Show this help message.
 
 Notes:
@@ -193,6 +232,10 @@ while [[ $# -gt 0 ]]; do
       KEEP_DOWNLOADS=1
       shift
       ;;
+    --force-third-party-kernel)
+      FORCE_THIRD_PARTY_KERNEL=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -205,6 +248,21 @@ done
 
 [[ "${EUID}" -eq 0 ]] || die "please run as root"
 command -v curl >/dev/null 2>&1 || die "curl is required"
+
+if [[ ! -r /etc/os-release ]]; then
+  die "cannot detect operating system"
+fi
+
+# shellcheck disable=SC1091
+source /etc/os-release
+case "${ID:-}" in
+  debian|ubuntu)
+    ;;
+  *)
+    die "unsupported system: ${PRETTY_NAME:-unknown}; only Debian/Ubuntu are supported"
+    ;;
+esac
+
 command -v dpkg >/dev/null 2>&1 || die "dpkg is required"
 command -v apt-get >/dev/null 2>&1 || die "apt-get is required"
 
@@ -224,20 +282,6 @@ if command -v mokutil >/dev/null 2>&1; then
   fi
 fi
 
-if [[ ! -r /etc/os-release ]]; then
-  die "cannot detect operating system"
-fi
-
-# shellcheck disable=SC1091
-source /etc/os-release
-case "${ID:-}" in
-  debian|ubuntu)
-    ;;
-  *)
-    die "unsupported system: ${PRETTY_NAME:-unknown}; only Debian/Ubuntu are supported"
-    ;;
-esac
-
 ARCH="$(dpkg --print-architecture)"
 case "${ARCH}" in
   amd64|arm64)
@@ -249,6 +293,7 @@ esac
 
 CURRENT_KERNEL="$(uname -r)"
 log "detected ${PRETTY_NAME:-$ID} on ${ARCH}, current kernel: ${CURRENT_KERNEL}"
+guard_unsafe_ubuntu_kernel_replacement
 
 ensure_ca_certificates
 

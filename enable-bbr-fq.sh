@@ -1,0 +1,197 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+AUTO_REBOOT=0
+SCRIPT_NAME="$(basename "$0")"
+APT_UPDATED=0
+APT_OPTS=(
+  -o Acquire::Retries=3
+  -o Acquire::http::Timeout=10
+  -o Acquire::https::Timeout=10
+  -o Dpkg::Options::=--force-confdef
+  -o Dpkg::Options::=--force-confold
+)
+
+log() {
+  printf '[%s] %s\n' "$SCRIPT_NAME" "$*"
+}
+
+die() {
+  printf '[%s] ERROR: %s\n' "$SCRIPT_NAME" "$*" >&2
+  exit 1
+}
+
+package_installed() {
+  dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q 'install ok installed'
+}
+
+apt_update_once() {
+  if [[ "${APT_UPDATED}" -eq 1 ]]; then
+    return
+  fi
+
+  log "updating apt cache once because a required package is missing"
+  DEBIAN_FRONTEND=noninteractive apt-get "${APT_OPTS[@]}" update -y
+  APT_UPDATED=1
+}
+
+apt_install_missing() {
+  local missing=()
+  local pkg
+
+  for pkg in "$@"; do
+    if ! package_installed "${pkg}"; then
+      missing+=("${pkg}")
+    fi
+  done
+
+  if [[ "${#missing[@]}" -eq 0 ]]; then
+    log "required apt packages already installed; skipping apt update"
+    return
+  fi
+
+  command -v apt-get >/dev/null 2>&1 || die "apt-get is required to install: ${missing[*]}"
+  apt_update_once
+  log "installing missing apt packages: ${missing[*]}"
+  DEBIAN_FRONTEND=noninteractive apt-get "${APT_OPTS[@]}" install -y "${missing[@]}"
+}
+
+install_iproute2_package() {
+  if command -v apt-get >/dev/null 2>&1; then
+    apt_install_missing iproute2
+    return
+  fi
+
+  if command -v dnf >/dev/null 2>&1; then
+    dnf install -y iproute iproute-tc || dnf install -y iproute
+    return
+  fi
+
+  if command -v yum >/dev/null 2>&1; then
+    yum install -y iproute iproute-tc || yum install -y iproute
+    return
+  fi
+
+  die "iproute2/iproute is required, but no supported package manager was found"
+}
+
+ensure_iproute2() {
+  if command -v ip >/dev/null 2>&1 && command -v tc >/dev/null 2>&1; then
+    return
+  fi
+
+  install_iproute2_package
+  command -v ip >/dev/null 2>&1 || die "ip is still missing after installing iproute2"
+  command -v tc >/dev/null 2>&1 || die "tc is still missing after installing iproute2"
+}
+
+disable_conflicting_bbrplus_sysctl() {
+  local backup_dir=""
+  local conf
+  local base
+
+  for conf in /etc/sysctl.d/99-bbrplus.conf /etc/sysctl.d/99-bbrplus-fq.conf; do
+    [[ -f "${conf}" ]] || continue
+
+    if [[ -z "${backup_dir}" ]]; then
+      backup_dir="/root/bbrplus-backup-$(date +%Y%m%d-%H%M%S)"
+      mkdir -p "${backup_dir}"
+    fi
+
+    base="$(basename "${conf}")"
+    mv "${conf}" "${backup_dir}/${base}"
+    log "moved conflicting ${conf} to ${backup_dir}/${base}"
+  done
+}
+
+usage() {
+  cat <<'EOF'
+Usage:
+  enable-bbr-fq.sh [--auto-reboot]
+
+Options:
+  --auto-reboot  Accepted for one-key compatibility; no reboot is required.
+  -h, --help     Show this help message.
+
+What this script does:
+  - sets net.core.default_qdisc = fq
+  - sets net.ipv4.tcp_congestion_control = bbr
+  - writes the settings to /etc/sysctl.d/99-bbr-fq.conf
+  - does not replace the kernel
+  - supports Debian/Ubuntu apt and RHEL-compatible dnf/yum systems
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --auto-reboot)
+      AUTO_REBOOT=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      die "unknown argument: $1"
+      ;;
+  esac
+done
+
+[[ "${EUID}" -eq 0 ]] || die "please run as root"
+command -v sysctl >/dev/null 2>&1 || die "sysctl is required"
+ensure_iproute2
+
+NIC="$(ip route show default | awk '/default/ {print $5; exit}')"
+[[ -n "${NIC}" ]] || die "failed to detect the default network interface"
+
+AVAILABLE_CC="$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || true)"
+if ! grep -qw 'bbr' <<<"${AVAILABLE_CC}" && command -v modprobe >/dev/null 2>&1; then
+  modprobe tcp_bbr 2>/dev/null || true
+  modprobe sch_fq 2>/dev/null || true
+  AVAILABLE_CC="$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || true)"
+fi
+
+if ! grep -qw 'bbr' <<<"${AVAILABLE_CC}"; then
+  die "bbr is not available on the current kernel ($(uname -r 2>/dev/null || echo unknown))"
+fi
+
+if command -v modprobe >/dev/null 2>&1; then
+  modprobe sch_fq 2>/dev/null || true
+fi
+
+disable_conflicting_bbrplus_sysctl
+
+cat >/etc/sysctl.d/99-bbr-fq.conf <<'EOF'
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+EOF
+
+log "wrote persistent config to /etc/sysctl.d/99-bbr-fq.conf"
+sysctl -w net.core.default_qdisc=fq >/dev/null
+sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null
+log "applied sysctl settings"
+
+if tc qdisc replace dev "${NIC}" root fq 2>/dev/null; then
+  log "applied fq immediately on ${NIC}"
+else
+  log "could not replace the active root qdisc on ${NIC}; persistent sysctl config is still written"
+fi
+
+cat <<EOF
+
+Persistent BBR + fq configuration applied without replacing the kernel.
+
+Current checks:
+  sysctl net.core.default_qdisc
+  sysctl net.ipv4.tcp_congestion_control
+  tc qdisc show dev ${NIC}
+
+EOF
+
+if [[ "${AUTO_REBOOT}" -eq 1 ]]; then
+  log "auto reboot was requested, but no kernel change was installed; skipping reboot"
+fi
+
+log "done; no reboot is required"

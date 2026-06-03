@@ -4,6 +4,7 @@ set -euo pipefail
 
 RAW_BASE="${RAW_BASE:-https://raw.githubusercontent.com/1660667086/bbrplus-installer-onekey/main}"
 AUTO_REBOOT=0
+FORCE_THIRD_PARTY_KERNEL=0
 SCRIPT_NAME="$(basename "$0")"
 INSTALL_ARGS=()
 APT_UPDATED=0
@@ -59,20 +60,42 @@ apt_install_missing() {
   DEBIAN_FRONTEND=noninteractive apt-get "${APT_OPTS[@]}" install -y "${missing[@]}"
 }
 
+install_iproute2_package() {
+  if command -v apt-get >/dev/null 2>&1; then
+    apt_install_missing iproute2
+    return
+  fi
+
+  if command -v dnf >/dev/null 2>&1; then
+    dnf install -y iproute iproute-tc || dnf install -y iproute
+    return
+  fi
+
+  if command -v yum >/dev/null 2>&1; then
+    yum install -y iproute iproute-tc || yum install -y iproute
+    return
+  fi
+
+  die "iproute2/iproute is required, but no supported package manager was found"
+}
+
 usage() {
   cat <<'EOF'
 Usage:
-  onekey-bbrplus-fq.sh [--auto-reboot] [--tag <release-tag>] [--keep-downloads]
+  onekey-bbrplus-fq.sh [--auto-reboot] [--tag <release-tag>] [--keep-downloads] [--force-third-party-kernel]
 
 Options:
   --auto-reboot    Reboot automatically when a reboot is required.
   --tag <tag>      Install a specific BBRplus release tag, e.g. 6.7.9-bbrplus.
   --keep-downloads Keep downloaded kernel packages in the temp directory.
+  --force-third-party-kernel
+                   Replace the kernel even on guarded Ubuntu LTS releases.
   -h, --help       Show this help message.
 
 What this script does:
   - if BBRplus is already available, persist and apply BBRplus + fq directly
-  - if BBRplus is not available, install the BBRplus kernel first
+  - on Ubuntu 22.04/24.04 and non-Debian/Ubuntu systems, default to built-in BBR + fq
+  - otherwise, if BBRplus is not available, install the BBRplus kernel first
   - install a one-shot boot finalizer so fq is applied after the kernel reboot
 EOF
 }
@@ -91,6 +114,11 @@ while [[ $# -gt 0 ]]; do
       ;;
     --keep-downloads)
       INSTALL_ARGS+=("--keep-downloads")
+      shift
+      ;;
+    --force-third-party-kernel)
+      FORCE_THIRD_PARTY_KERNEL=1
+      INSTALL_ARGS+=("--force-third-party-kernel")
       shift
       ;;
     -h|--help)
@@ -112,7 +140,7 @@ ensure_iproute2() {
     return
   fi
 
-  apt_install_missing iproute2
+  install_iproute2_package
   command -v ip >/dev/null 2>&1 || die "ip is still missing after installing iproute2"
   command -v tc >/dev/null 2>&1 || die "tc is still missing after installing iproute2"
 }
@@ -254,6 +282,72 @@ run_remote_script() {
   bash "${tmp}" "$@"
 }
 
+get_os_field() {
+  local field="$1"
+
+  [[ -r /etc/os-release ]] || return 1
+  (
+    # shellcheck disable=SC1091
+    source /etc/os-release
+    case "${field}" in
+      ID)
+        printf '%s' "${ID:-}"
+        ;;
+      VERSION_ID)
+        printf '%s' "${VERSION_ID:-}"
+        ;;
+      PRETTY_NAME)
+        printf '%s' "${PRETTY_NAME:-}"
+        ;;
+    esac
+  )
+}
+
+should_use_mainline_bbr_fallback() {
+  local os_id
+  local os_version
+
+  [[ "${FORCE_THIRD_PARTY_KERNEL}" -eq 0 ]] || return 1
+
+  os_id="$(get_os_field ID || true)"
+  os_version="$(get_os_field VERSION_ID || true)"
+
+  case "${os_id}" in
+    debian)
+      return 1
+      ;;
+    ubuntu)
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+
+  case "${os_version}" in
+    22.04|24.04)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+guard_supported_kernel_installer() {
+  local os_id
+  local os_pretty
+
+  os_id="$(get_os_field ID || true)"
+  case "${os_id}" in
+    debian|ubuntu)
+      return
+      ;;
+  esac
+
+  os_pretty="$(get_os_field PRETTY_NAME || true)"
+  die "${os_pretty:-unsupported system} is not supported by the BBRplus kernel installer; only Debian/Ubuntu .deb installs are implemented"
+}
+
 ensure_iproute2
 
 if bbrplus_available; then
@@ -266,6 +360,19 @@ if bbrplus_available; then
   exit 0
 fi
 
-log "current kernel $(uname -r) does not expose bbrplus; installing BBRplus kernel first"
+log "current kernel $(uname -r) does not expose bbrplus"
+if should_use_mainline_bbr_fallback; then
+  os_pretty="$(get_os_field PRETTY_NAME || true)"
+  log "${os_pretty:-guarded Ubuntu LTS} detected; using built-in BBR + fq instead of replacing the kernel"
+  if [[ "${AUTO_REBOOT}" -eq 1 ]]; then
+    run_remote_script "enable-bbr-fq.sh" "--auto-reboot"
+  else
+    run_remote_script "enable-bbr-fq.sh"
+  fi
+  exit 0
+fi
+
+guard_supported_kernel_installer
+log "installing BBRplus kernel first"
 install_boot_finalizer
 run_remote_script "install-bbrplus.sh" "${INSTALL_ARGS[@]}"
