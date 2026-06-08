@@ -4,7 +4,7 @@ set -euo pipefail
 
 RAW_BASE="${RAW_BASE:-https://raw.githubusercontent.com/1660667086/bbrplus-installer-onekey/main}"
 AUTO_REBOOT=0
-FORCE_THIRD_PARTY_KERNEL=0
+SAFE_BBR=0
 SCRIPT_NAME="$(basename "$0")"
 INSTALL_ARGS=()
 APT_UPDATED=0
@@ -82,20 +82,22 @@ install_iproute2_package() {
 usage() {
   cat <<'EOF'
 Usage:
-  onekey-bbrplus-fq.sh [--auto-reboot] [--tag <release-tag>] [--keep-downloads] [--force-third-party-kernel]
+  onekey-bbrplus-fq.sh [--auto-reboot] [--tag <release-tag>] [--keep-downloads] [--safe-bbr]
 
 Options:
   --auto-reboot    Reboot automatically when a reboot is required.
   --tag <tag>      Install a specific BBRplus release tag, e.g. 6.7.9-bbrplus.
   --keep-downloads Keep downloaded kernel packages in the temp directory.
+  --safe-bbr       Do not replace the kernel; apply built-in BBR + fq only.
   --force-third-party-kernel
-                   Replace the kernel even on guarded Ubuntu LTS releases.
+                   Compatibility option; Debian/Ubuntu installs BBRplus by default.
   -h, --help       Show this help message.
 
 What this script does:
   - if BBRplus is already available, persist and apply BBRplus + fq directly
-  - on Ubuntu 22.04/24.04 and non-Debian/Ubuntu systems, default to built-in BBR + fq
-  - otherwise, if BBRplus is not available, install the BBRplus kernel first
+  - on Debian/Ubuntu, if BBRplus is not available, install the BBRplus kernel first
+  - on non-Debian/Ubuntu systems, use built-in BBR + fq because .deb kernel install is unsupported
+  - with --safe-bbr, use built-in BBR + fq without replacing the kernel
   - install a one-shot boot finalizer so fq is applied after the kernel reboot
 EOF
 }
@@ -116,9 +118,12 @@ while [[ $# -gt 0 ]]; do
       INSTALL_ARGS+=("--keep-downloads")
       shift
       ;;
+    --safe-bbr)
+      SAFE_BBR=1
+      shift
+      ;;
     --force-third-party-kernel)
-      FORCE_THIRD_PARTY_KERNEL=1
-      INSTALL_ARGS+=("--force-third-party-kernel")
+      log "--force-third-party-kernel is no longer required; Debian/Ubuntu installs BBRplus by default"
       shift
       ;;
     -h|--help)
@@ -273,6 +278,15 @@ EOF
   log "installed boot finalizer: bbrplus-fq-finalize.service"
 }
 
+cleanup_boot_finalizer() {
+  command -v systemctl >/dev/null 2>&1 || return
+
+  systemctl disable --now bbrplus-fq-finalize.service >/dev/null 2>&1 || true
+  rm -f /etc/systemd/system/bbrplus-fq-finalize.service /usr/local/sbin/bbrplus-fq-finalize.sh
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  log "removed boot finalizer after installer failure"
+}
+
 run_remote_script() {
   local script="$1"
   shift
@@ -305,30 +319,15 @@ get_os_field() {
 
 should_use_mainline_bbr_fallback() {
   local os_id
-  local os_version
-
-  [[ "${FORCE_THIRD_PARTY_KERNEL}" -eq 0 ]] || return 1
 
   os_id="$(get_os_field ID || true)"
-  os_version="$(get_os_field VERSION_ID || true)"
 
   case "${os_id}" in
-    debian)
+    debian|ubuntu)
       return 1
-      ;;
-    ubuntu)
       ;;
     *)
       return 0
-      ;;
-  esac
-
-  case "${os_version}" in
-    22.04|24.04)
-      return 0
-      ;;
-    *)
-      return 1
       ;;
   esac
 }
@@ -350,6 +349,16 @@ guard_supported_kernel_installer() {
 
 ensure_iproute2
 
+if [[ "${SAFE_BBR}" -eq 1 ]]; then
+  log "--safe-bbr requested; using built-in BBR + fq without replacing the kernel"
+  if [[ "${AUTO_REBOOT}" -eq 1 ]]; then
+    run_remote_script "enable-bbr-fq.sh" "--auto-reboot"
+  else
+    run_remote_script "enable-bbr-fq.sh"
+  fi
+  exit 0
+fi
+
 if bbrplus_available; then
   log "bbrplus is already available on the current kernel; applying fq now"
   if [[ "${AUTO_REBOOT}" -eq 1 ]]; then
@@ -363,7 +372,7 @@ fi
 log "current kernel $(uname -r) does not expose bbrplus"
 if should_use_mainline_bbr_fallback; then
   os_pretty="$(get_os_field PRETTY_NAME || true)"
-  log "${os_pretty:-guarded Ubuntu LTS} detected; using built-in BBR + fq instead of replacing the kernel"
+  log "${os_pretty:-system} detected; using built-in BBR + fq instead of replacing the kernel"
   if [[ "${AUTO_REBOOT}" -eq 1 ]]; then
     run_remote_script "enable-bbr-fq.sh" "--auto-reboot"
   else
@@ -375,4 +384,7 @@ fi
 guard_supported_kernel_installer
 log "installing BBRplus kernel first"
 install_boot_finalizer
-run_remote_script "install-bbrplus.sh" "${INSTALL_ARGS[@]}"
+if ! run_remote_script "install-bbrplus.sh" "${INSTALL_ARGS[@]}"; then
+  cleanup_boot_finalizer
+  exit 1
+fi

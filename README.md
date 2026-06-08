@@ -1,18 +1,17 @@
 # BBRplus + fq One-Key Installer
 
-One-command installer for TCP acceleration on Debian, Ubuntu, and
-RHEL-compatible servers.
+One-command installer for BBRplus + fq on Debian/Ubuntu servers, with a safe
+built-in BBR + fq fallback for systems where the BBRplus `.deb` kernel installer
+is not supported.
 
-By default, Ubuntu 22.04 and Ubuntu 24.04 use the safe stock-kernel path:
-`fq + bbr`. These releases already include mainline BBR, and replacing their
-stock/cloud kernel with an unsigned third-party BBRplus kernel has caused VPS
-instances to become unreachable after reboot.
+On Debian/Ubuntu, the one-key installer installs the third-party BBRplus kernel
+when the running kernel does not already expose `bbrplus`. Ubuntu 22.04/24.04
+can work on some providers, but replacing the stock/cloud kernel can make other
+provider images unreachable after reboot. Keep snapshot, VNC, serial console, or
+rescue access available for production machines.
 
-Non-Debian/Ubuntu systems also use the safe stock-kernel path. The BBRplus
-kernel installer currently supports only Debian/Ubuntu `.deb` packages.
-
-Other supported Debian/Ubuntu releases still install the BBRplus kernel when
-the running kernel does not expose `bbrplus`.
+Non-Debian/Ubuntu systems use the safe stock-kernel path because this repository
+currently ships only Debian/Ubuntu `.deb` BBRplus kernel packages.
 
 ## One-Key Install
 
@@ -24,13 +23,11 @@ Behavior:
 
 - If the current kernel already supports `bbrplus`, the script applies
   `fq + bbrplus`.
-- On Ubuntu 22.04 / 24.04, if `bbrplus` is not already available, the script
-  applies safe stock-kernel `fq + bbr` instead and does not replace the kernel.
+- On Debian/Ubuntu, if `bbrplus` is not available, the script installs the
+  BBRplus kernel first. After reboot, a one-shot systemd finalizer applies
+  persistent `fq + bbrplus`.
 - On non-Debian/Ubuntu systems, the script applies safe stock-kernel `fq + bbr`
   instead and does not replace the kernel.
-- On other supported Debian/Ubuntu systems, if `bbrplus` is not available, the
-  script installs the BBRplus kernel first. After reboot, a one-shot systemd
-  finalizer applies persistent `fq + bbrplus`.
 
 ## Safe Built-In BBR + fq
 
@@ -41,14 +38,20 @@ you do not want to replace the provider kernel:
 bash <(curl -fsSL https://raw.githubusercontent.com/1660667086/bbrplus-installer-onekey/main/enable-bbr-fq.sh)
 ```
 
+Or use the one-key script in safe mode:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/1660667086/bbrplus-installer-onekey/main/onekey-bbrplus-fq.sh) --safe-bbr
+```
+
 ## Install Kernel Only
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/1660667086/bbrplus-installer-onekey/main/install-bbrplus.sh) --auto-reboot
 ```
 
-On Ubuntu 22.04 / 24.04, direct BBRplus kernel installation is blocked by
-default. If you have serial console or rescue access and accept the risk:
+The compatibility flag below is still accepted, but no longer required because
+direct BBRplus kernel installation proceeds by default on Debian/Ubuntu:
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/1660667086/bbrplus-installer-onekey/main/install-bbrplus.sh) --force-third-party-kernel --auto-reboot
@@ -83,8 +86,8 @@ lsmod | grep bbr
 - Supported architectures: `amd64 / arm64`
 - Containers like `LXC / OpenVZ / Docker` cannot replace the host kernel
 - Machines with `Secure Boot` enabled are not recommended for unsigned third-party kernels
-- Ubuntu 22.04 / 24.04 use stock-kernel `bbr` by default; forcing BBRplus kernel
-  replacement on these releases can make cloud VPS instances unreachable
+- Ubuntu 22.04 / 24.04 can install BBRplus on compatible providers, but kernel
+  replacement can still make incompatible provider images unreachable after reboot
 - RHEL-compatible systems do not use the BBRplus kernel installer; they use
   stock-kernel `bbr` when available
 - On multi-queue NICs, `tc qdisc show` may still display `mq` as the root qdisc; that does not necessarily mean `fq` is inactive

@@ -105,6 +105,17 @@ disable_conflicting_bbrplus_sysctl() {
   done
 }
 
+disable_bbrplus_finalizer() {
+  command -v systemctl >/dev/null 2>&1 || return
+
+  if [[ -f /etc/systemd/system/bbrplus-fq-finalize.service || -f /usr/local/sbin/bbrplus-fq-finalize.sh ]]; then
+    systemctl disable --now bbrplus-fq-finalize.service >/dev/null 2>&1 || true
+    rm -f /etc/systemd/system/bbrplus-fq-finalize.service /usr/local/sbin/bbrplus-fq-finalize.sh
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    log "removed stale bbrplus-fq-finalize.service"
+  fi
+}
+
 usage() {
   cat <<'EOF'
 Usage:
@@ -162,6 +173,7 @@ if command -v modprobe >/dev/null 2>&1; then
 fi
 
 disable_conflicting_bbrplus_sysctl
+disable_bbrplus_finalizer
 
 cat >/etc/sysctl.d/99-bbr-fq.conf <<'EOF'
 net.core.default_qdisc = fq

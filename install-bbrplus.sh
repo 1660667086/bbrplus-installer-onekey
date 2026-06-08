@@ -5,7 +5,6 @@ set -euo pipefail
 REPO="UJX6N/bbrplus-6.x_stable"
 AUTO_REBOOT=0
 KEEP_DOWNLOADS=0
-FORCE_THIRD_PARTY_KERNEL=0
 RELEASE_TAG=""
 SCRIPT_NAME="$(basename "$0")"
 WORKDIR=""
@@ -166,27 +165,21 @@ is_guarded_ubuntu_lts() {
   esac
 }
 
-guard_unsafe_ubuntu_kernel_replacement() {
-  if [[ "${FORCE_THIRD_PARTY_KERNEL}" -eq 1 ]]; then
-    return
-  fi
-
+warn_ubuntu_lts_kernel_replacement() {
   if ! is_guarded_ubuntu_lts; then
     return
   fi
 
   cat >&2 <<EOF
-[${SCRIPT_NAME}] ERROR: ${PRETTY_NAME:-Ubuntu ${VERSION_ID}} detected.
+[${SCRIPT_NAME}] WARNING: ${PRETTY_NAME:-Ubuntu ${VERSION_ID}} detected.
 
-This script would replace the stock/cloud Ubuntu kernel with an unsigned
-third-party BBRplus kernel. On Ubuntu 22.04/24.04 VPS images this has caused
-machines to become unreachable after reboot.
+This script will replace the stock/cloud Ubuntu kernel with an unsigned
+third-party BBRplus kernel. Some Ubuntu 22.04/24.04 VPS images may become
+unreachable after reboot if the provider image is not compatible.
 
-Use enable-bbr-fq.sh for the safe built-in BBR + fq path, or rerun with
---force-third-party-kernel only when you have console/rollback access and
-accept the boot/network risk.
+Make sure you have snapshot, VNC, serial console, or rescue access before
+rebooting production machines.
 EOF
-  exit 1
 }
 
 usage() {
@@ -199,7 +192,7 @@ Options:
   --tag <tag>      Install a specific release tag, e.g. 6.7.9-bbrplus.
   --keep-downloads Keep downloaded .deb packages in the temp directory.
   --force-third-party-kernel
-                   Allow third-party kernel replacement on guarded Ubuntu LTS releases.
+                   Compatibility option; BBRplus kernel install proceeds by default.
   -h, --help       Show this help message.
 
 Notes:
@@ -233,7 +226,7 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --force-third-party-kernel)
-      FORCE_THIRD_PARTY_KERNEL=1
+      log "--force-third-party-kernel is no longer required; BBRplus kernel install proceeds by default"
       shift
       ;;
     -h|--help)
@@ -293,7 +286,7 @@ esac
 
 CURRENT_KERNEL="$(uname -r)"
 log "detected ${PRETTY_NAME:-$ID} on ${ARCH}, current kernel: ${CURRENT_KERNEL}"
-guard_unsafe_ubuntu_kernel_replacement
+warn_ubuntu_lts_kernel_replacement
 
 ensure_ca_certificates
 
