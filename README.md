@@ -28,6 +28,10 @@ Behavior:
   persistent `fq + bbrplus`.
 - On non-Debian/Ubuntu systems, the script applies safe stock-kernel `fq + bbr`
   instead and does not replace the kernel.
+- Kernel packages are installed in a recoverable sequence: headers first, image
+  second, with one automatic `dpkg` repair and retry if the image install fails.
+- The one-shot boot finalizer is enabled only after the kernel installer
+  completes successfully.
 
 ## Safe Built-In BBR + fq
 
@@ -78,6 +82,27 @@ sysctl net.ipv4.tcp_congestion_control
 sysctl net.core.default_qdisc
 lsmod | grep bbr
 ```
+
+## Recover An Interrupted Install
+
+If the installer exits during `dpkg` and reports a kept `/tmp/bbrplus-install.*`
+directory, do not reboot first. Check and repair the package database:
+
+```bash
+dpkg --audit
+dpkg --configure -a
+```
+
+If `linux-image-<version>` is still reported as broken, reinstall the downloaded
+image package from the kept directory:
+
+```bash
+dpkg -i /tmp/bbrplus-install.*/Debian-Ubuntu_Required_linux-image-*_*.deb
+dpkg --audit
+```
+
+After `dpkg --audit` is clean, run `update-grub` and choose the generated
+BBRplus GRUB entry if it was not already set automatically.
 
 ## Notes
 

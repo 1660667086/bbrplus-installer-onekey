@@ -8,6 +8,7 @@ KEEP_DOWNLOADS=0
 RELEASE_TAG=""
 SCRIPT_NAME="$(basename "$0")"
 WORKDIR=""
+INSTALL_SUCCEEDED=0
 APT_UPDATED=0
 APT_OPTS=(
   -o Acquire::Retries=3
@@ -203,8 +204,14 @@ EOF
 }
 
 cleanup() {
-  if [[ -n "${WORKDIR}" && -d "${WORKDIR}" && "${KEEP_DOWNLOADS}" -eq 0 ]]; then
+  if [[ -z "${WORKDIR}" || ! -d "${WORKDIR}" || "${KEEP_DOWNLOADS}" -eq 1 ]]; then
+    return
+  fi
+
+  if [[ "${INSTALL_SUCCEEDED}" -eq 1 ]]; then
     rm -rf "${WORKDIR}"
+  else
+    log "installer did not complete; keeping downloaded packages in ${WORKDIR}"
   fi
 }
 
@@ -317,6 +324,55 @@ log "downloading packages to ${WORKDIR}"
 curl -fL --retry 3 --connect-timeout 15 -o "${WORKDIR}/${IMAGE_ASSET}" "${IMAGE_URL}"
 curl -fL --retry 3 --connect-timeout 15 -o "${WORKDIR}/${HEADERS_ASSET}" "${HEADERS_URL}"
 
+repair_dpkg_state() {
+  log "repairing dpkg state"
+  dpkg --configure -a || true
+  apt_update_once
+  DEBIAN_FRONTEND=noninteractive apt-get "${APT_OPTS[@]}" install -f -y || true
+  dpkg --configure -a
+}
+
+install_deb_with_repair() {
+  local deb="$1"
+  local label="$2"
+
+  if dpkg -i "${deb}"; then
+    return 0
+  fi
+
+  log "${label} install failed; running dpkg repair and retrying once"
+  repair_dpkg_state || true
+
+  if dpkg -i "${deb}"; then
+    return 0
+  fi
+
+  log "${label} install still failed after retry"
+  dpkg --audit || true
+  return 1
+}
+
+install_kernel_packages() {
+  log "installing BBRplus kernel headers"
+  install_deb_with_repair "${WORKDIR}/${HEADERS_ASSET}" "kernel headers" || return 1
+
+  log "installing BBRplus kernel image"
+  install_deb_with_repair "${WORKDIR}/${IMAGE_ASSET}" "kernel image" || return 1
+
+  repair_dpkg_state
+
+  package_installed "linux-headers-${VERSION}" || return 1
+  package_installed "linux-image-${VERSION}" || return 1
+
+  [[ -s "/boot/vmlinuz-${VERSION}" ]] || die "installed package is missing /boot/vmlinuz-${VERSION}"
+  if [[ ! -s "/boot/initrd.img-${VERSION}" && -x "$(command -v update-initramfs || true)" ]]; then
+    log "initrd is missing; regenerating /boot/initrd.img-${VERSION}"
+    update-initramfs -c -k "${VERSION}"
+  fi
+}
+
+install_kernel_packages || die "failed to install BBRplus kernel packages; downloaded packages kept in ${WORKDIR}"
+
 if [[ -f /etc/sysctl.d/99-bbrplus.conf ]]; then
   BACKUP_DIR="/root/bbrplus-backup-$(date +%Y%m%d-%H%M%S)"
   mkdir -p "${BACKUP_DIR}"
@@ -329,12 +385,6 @@ net.core.default_qdisc = fq
 net.ipv4.tcp_congestion_control = bbrplus
 EOF
 
-log "installing BBRplus kernel packages"
-dpkg -i "${WORKDIR}/${HEADERS_ASSET}" "${WORKDIR}/${IMAGE_ASSET}" || {
-  apt_update_once
-  DEBIAN_FRONTEND=noninteractive apt-get "${APT_OPTS[@]}" install -f -y
-}
-
 if ! run_grub_update; then
   log "could not regenerate GRUB config automatically"
 fi
@@ -345,6 +395,8 @@ if sysctl net.ipv4.tcp_available_congestion_control 2>/dev/null | grep -qw bbrpl
   log "bbrplus is already available on the running kernel; applying sysctl now"
   sysctl --system >/dev/null
 fi
+
+INSTALL_SUCCEEDED=1
 
 cat <<EOF
 

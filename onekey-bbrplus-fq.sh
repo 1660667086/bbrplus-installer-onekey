@@ -106,7 +106,6 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --auto-reboot)
       AUTO_REBOOT=1
-      INSTALL_ARGS+=("--auto-reboot")
       shift
       ;;
     --tag)
@@ -383,8 +382,17 @@ fi
 
 guard_supported_kernel_installer
 log "installing BBRplus kernel first"
-install_boot_finalizer
 if ! run_remote_script "install-bbrplus.sh" "${INSTALL_ARGS[@]}"; then
   cleanup_boot_finalizer
   exit 1
+fi
+
+install_boot_finalizer
+
+if [[ "${AUTO_REBOOT}" -eq 1 ]]; then
+  log "auto reboot requested; rebooting in 5 seconds"
+  sleep 5
+  reboot
+else
+  log "reboot is required to finish enabling BBRplus"
 fi
