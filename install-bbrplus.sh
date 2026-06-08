@@ -9,6 +9,11 @@ RELEASE_TAG=""
 SCRIPT_NAME="$(basename "$0")"
 WORKDIR=""
 INSTALL_SUCCEEDED=0
+TEMP_SWAP_MODE="auto"
+TEMP_SWAP_SIZE_MB=1024
+TEMP_SWAP_THRESHOLD_MB=2048
+TEMP_SWAP_FILE=""
+TEMP_SWAP_CREATED=0
 APT_UPDATED=0
 APT_OPTS=(
   -o Acquire::Retries=3
@@ -186,12 +191,15 @@ EOF
 usage() {
   cat <<'EOF'
 Usage:
-  install-bbrplus.sh [--auto-reboot] [--tag <release-tag>] [--keep-downloads] [--force-third-party-kernel]
+  install-bbrplus.sh [--auto-reboot] [--tag <release-tag>] [--keep-downloads] [--temp-swap <size>] [--no-temp-swap] [--force-third-party-kernel]
 
 Options:
   --auto-reboot    Reboot automatically after installation completes.
   --tag <tag>      Install a specific release tag, e.g. 6.7.9-bbrplus.
   --keep-downloads Keep downloaded .deb packages in the temp directory.
+  --temp-swap <size>
+                   Create a temporary install-only swap file, e.g. 1G or 2048M.
+  --no-temp-swap   Disable automatic temporary swap creation.
   --force-third-party-kernel
                    Compatibility option; BBRplus kernel install proceeds by default.
   -h, --help       Show this help message.
@@ -200,10 +208,13 @@ Notes:
   - Supported systems: Debian / Ubuntu on amd64 or arm64
   - Containers such as LXC / OpenVZ / Docker cannot replace the host kernel
   - This script installs a third-party BBRplus kernel and leaves old kernels intact
+  - On low-memory servers without swap, a temporary 1G swap file is used during install
 EOF
 }
 
 cleanup() {
+  cleanup_temp_swap
+
   if [[ -z "${WORKDIR}" || ! -d "${WORKDIR}" || "${KEEP_DOWNLOADS}" -eq 1 ]]; then
     return
   fi
@@ -216,6 +227,104 @@ cleanup() {
 }
 
 trap cleanup EXIT
+
+parse_size_mb() {
+  local raw="$1"
+  local normalized
+  local number
+  local unit
+
+  normalized="${raw,,}"
+  if [[ ! "${normalized}" =~ ^([0-9]+)([gm]?)$ ]]; then
+    die "invalid swap size '${raw}', use values like 1024M or 1G"
+  fi
+
+  number="${BASH_REMATCH[1]}"
+  unit="${BASH_REMATCH[2]}"
+
+  case "${unit}" in
+    g)
+      printf '%s\n' "$((number * 1024))"
+      ;;
+    m|"")
+      printf '%s\n' "${number}"
+      ;;
+  esac
+}
+
+active_swap_mb() {
+  awk 'NR > 1 {sum += $3} END {printf "%d\n", sum / 1024}' /proc/swaps 2>/dev/null || printf '0\n'
+}
+
+mem_total_mb() {
+  awk '/MemTotal:/ {printf "%d\n", $2 / 1024}' /proc/meminfo 2>/dev/null || printf '0\n'
+}
+
+create_temp_swap() {
+  local mem_mb
+  local swap_mb
+  local avail_mb
+  local swap_dir="/var/tmp"
+
+  [[ "${TEMP_SWAP_MODE}" != "off" ]] || return
+
+  swap_mb="$(active_swap_mb)"
+  if [[ "${TEMP_SWAP_MODE}" == "auto" && "${swap_mb}" -gt 0 ]]; then
+    log "active swap already present (${swap_mb}M); skipping temporary swap"
+    return
+  fi
+
+  mem_mb="$(mem_total_mb)"
+  if [[ "${TEMP_SWAP_MODE}" == "auto" && "${mem_mb}" -ge "${TEMP_SWAP_THRESHOLD_MB}" ]]; then
+    log "memory is ${mem_mb}M; skipping automatic temporary swap"
+    return
+  fi
+
+  mkdir -p "${swap_dir}"
+  avail_mb="$(df -Pm "${swap_dir}" | awk 'NR == 2 {print $4}')"
+  if [[ -n "${avail_mb}" && "${avail_mb}" -le $((TEMP_SWAP_SIZE_MB + 256)) ]]; then
+    if [[ "${TEMP_SWAP_MODE}" == "always" ]]; then
+      die "not enough free space in ${swap_dir} for ${TEMP_SWAP_SIZE_MB}M temporary swap"
+    fi
+    log "not enough free space in ${swap_dir} for temporary swap; continuing without it"
+    return
+  fi
+
+  command -v mkswap >/dev/null 2>&1 || die "mkswap is required for temporary swap"
+  command -v swapon >/dev/null 2>&1 || die "swapon is required for temporary swap"
+
+  TEMP_SWAP_FILE="$(mktemp "${swap_dir}/bbrplus-install-swap.XXXXXX")"
+  chmod 600 "${TEMP_SWAP_FILE}"
+  if ! fallocate -l "${TEMP_SWAP_SIZE_MB}M" "${TEMP_SWAP_FILE}" 2>/dev/null; then
+    dd if=/dev/zero of="${TEMP_SWAP_FILE}" bs=1M count="${TEMP_SWAP_SIZE_MB}" status=none
+  fi
+
+  mkswap "${TEMP_SWAP_FILE}" >/dev/null
+  if ! swapon "${TEMP_SWAP_FILE}" 2>/dev/null; then
+    log "temporary swap created with fallocate was rejected; recreating with dd"
+    rm -f "${TEMP_SWAP_FILE}"
+    TEMP_SWAP_FILE="$(mktemp "${swap_dir}/bbrplus-install-swap.XXXXXX")"
+    chmod 600 "${TEMP_SWAP_FILE}"
+    dd if=/dev/zero of="${TEMP_SWAP_FILE}" bs=1M count="${TEMP_SWAP_SIZE_MB}" status=none
+    mkswap "${TEMP_SWAP_FILE}" >/dev/null
+    swapon "${TEMP_SWAP_FILE}"
+  fi
+  TEMP_SWAP_CREATED=1
+  log "enabled temporary ${TEMP_SWAP_SIZE_MB}M swap at ${TEMP_SWAP_FILE}"
+}
+
+cleanup_temp_swap() {
+  if [[ -z "${TEMP_SWAP_FILE}" ]]; then
+    return
+  fi
+
+  if [[ "${TEMP_SWAP_CREATED}" -eq 1 ]]; then
+    swapoff "${TEMP_SWAP_FILE}" >/dev/null 2>&1 || true
+  fi
+  rm -f "${TEMP_SWAP_FILE}"
+  TEMP_SWAP_CREATED=0
+  log "removed temporary swap"
+}
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -230,6 +339,17 @@ while [[ $# -gt 0 ]]; do
       ;;
     --keep-downloads)
       KEEP_DOWNLOADS=1
+      shift
+      ;;
+    --temp-swap)
+      [[ $# -ge 2 ]] || die "--temp-swap requires a size, e.g. 1G or 2048M"
+      TEMP_SWAP_MODE="always"
+      TEMP_SWAP_SIZE_MB="$(parse_size_mb "$2")"
+      [[ "${TEMP_SWAP_SIZE_MB}" -ge 128 ]] || die "--temp-swap must be at least 128M"
+      shift 2
+      ;;
+    --no-temp-swap)
+      TEMP_SWAP_MODE="off"
       shift
       ;;
     --force-third-party-kernel)
@@ -371,6 +491,7 @@ install_kernel_packages() {
   fi
 }
 
+create_temp_swap
 install_kernel_packages || die "failed to install BBRplus kernel packages; downloaded packages kept in ${WORKDIR}"
 
 if [[ -f /etc/sysctl.d/99-bbrplus.conf ]]; then

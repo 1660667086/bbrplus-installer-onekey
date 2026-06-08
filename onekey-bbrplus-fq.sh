@@ -82,12 +82,15 @@ install_iproute2_package() {
 usage() {
   cat <<'EOF'
 Usage:
-  onekey-bbrplus-fq.sh [--auto-reboot] [--tag <release-tag>] [--keep-downloads] [--safe-bbr]
+  onekey-bbrplus-fq.sh [--auto-reboot] [--tag <release-tag>] [--keep-downloads] [--temp-swap <size>] [--no-temp-swap] [--safe-bbr]
 
 Options:
   --auto-reboot    Reboot automatically when a reboot is required.
   --tag <tag>      Install a specific BBRplus release tag, e.g. 6.7.9-bbrplus.
   --keep-downloads Keep downloaded kernel packages in the temp directory.
+  --temp-swap <size>
+                   Create a temporary install-only swap file, e.g. 1G or 2048M.
+  --no-temp-swap   Disable automatic temporary swap creation.
   --safe-bbr       Do not replace the kernel; apply built-in BBR + fq only.
   --force-third-party-kernel
                    Compatibility option; Debian/Ubuntu installs BBRplus by default.
@@ -115,6 +118,15 @@ while [[ $# -gt 0 ]]; do
       ;;
     --keep-downloads)
       INSTALL_ARGS+=("--keep-downloads")
+      shift
+      ;;
+    --temp-swap)
+      [[ $# -ge 2 ]] || die "--temp-swap requires a size, e.g. 1G or 2048M"
+      INSTALL_ARGS+=("--temp-swap" "$2")
+      shift 2
+      ;;
+    --no-temp-swap)
+      INSTALL_ARGS+=("--no-temp-swap")
       shift
       ;;
     --safe-bbr)

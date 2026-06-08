@@ -30,6 +30,8 @@ Behavior:
   instead and does not replace the kernel.
 - Kernel packages are installed in a recoverable sequence: headers first, image
   second, with one automatic `dpkg` repair and retry if the image install fails.
+- On low-memory servers without active swap, the installer creates a temporary
+  install-only swap file and removes it before exiting.
 - The one-shot boot finalizer is enabled only after the kernel installer
   completes successfully.
 
@@ -52,6 +54,18 @@ bash <(curl -fsSL https://raw.githubusercontent.com/1660667086/bbrplus-installer
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/1660667086/bbrplus-installer-onekey/main/install-bbrplus.sh) --auto-reboot
+```
+
+Force a larger temporary swap file during installation:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/1660667086/bbrplus-installer-onekey/main/onekey-bbrplus-fq.sh) --temp-swap 2G --auto-reboot
+```
+
+Disable temporary swap creation:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/1660667086/bbrplus-installer-onekey/main/onekey-bbrplus-fq.sh) --no-temp-swap --auto-reboot
 ```
 
 The compatibility flag below is still accepted, but no longer required because
@@ -113,6 +127,8 @@ BBRplus GRUB entry if it was not already set automatically.
 - Machines with `Secure Boot` enabled are not recommended for unsigned third-party kernels
 - Ubuntu 22.04 / 24.04 can install BBRplus on compatible providers, but kernel
   replacement can still make incompatible provider images unreachable after reboot
+- Temporary swap is used only during installation; the scripts do not add it to
+  `/etc/fstab`
 - RHEL-compatible systems do not use the BBRplus kernel installer; they use
   stock-kernel `bbr` when available
 - On multi-queue NICs, `tc qdisc show` may still display `mq` as the root qdisc; that does not necessarily mean `fq` is inactive
