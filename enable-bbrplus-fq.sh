@@ -57,12 +57,31 @@ apt_install_missing() {
   DEBIAN_FRONTEND=noninteractive apt-get "${APT_OPTS[@]}" install -y "${missing[@]}"
 }
 
+install_iproute_package() {
+  if command -v apt-get >/dev/null 2>&1; then
+    apt_install_missing iproute2
+    return
+  fi
+
+  if command -v dnf >/dev/null 2>&1; then
+    dnf install -y iproute iproute-tc || dnf install -y iproute
+    return
+  fi
+
+  if command -v yum >/dev/null 2>&1; then
+    yum install -y iproute iproute-tc || yum install -y iproute
+    return
+  fi
+
+  die "iproute2/iproute is required, but no supported package manager was found"
+}
+
 ensure_iproute2() {
   if command -v ip >/dev/null 2>&1 && command -v tc >/dev/null 2>&1; then
     return
   fi
 
-  apt_install_missing iproute2
+  install_iproute_package
   command -v ip >/dev/null 2>&1 || die "ip is still missing after installing iproute2"
   command -v tc >/dev/null 2>&1 || die "tc is still missing after installing iproute2"
 }

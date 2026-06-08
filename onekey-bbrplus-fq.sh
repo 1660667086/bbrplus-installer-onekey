@@ -99,7 +99,8 @@ Options:
 What this script does:
   - if BBRplus is already available, persist and apply BBRplus + fq directly
   - on Debian/Ubuntu, if BBRplus is not available, install the BBRplus kernel first
-  - on non-Debian/Ubuntu systems, use built-in BBR + fq because .deb kernel install is unsupported
+  - on supported EL7/EL8-compatible systems, install the BBRplus RPM kernel first
+  - on systems without a matching BBRplus package, use built-in BBR + fq
   - with --safe-bbr, use built-in BBR + fq without replacing the kernel
   - install a one-shot boot finalizer so fq is applied after the kernel reboot
 EOF
@@ -236,8 +237,27 @@ apt_install_missing() {
   DEBIAN_FRONTEND=noninteractive apt-get "${APT_OPTS[@]}" install -y "${missing[@]}"
 }
 
+install_iproute_package() {
+  if command -v apt-get >/dev/null 2>&1; then
+    apt_install_missing iproute2
+    return
+  fi
+
+  if command -v dnf >/dev/null 2>&1; then
+    dnf install -y iproute iproute-tc || dnf install -y iproute
+    return
+  fi
+
+  if command -v yum >/dev/null 2>&1; then
+    yum install -y iproute iproute-tc || yum install -y iproute
+    return
+  fi
+
+  return 1
+}
+
 if ! command -v ip >/dev/null 2>&1 || ! command -v tc >/dev/null 2>&1; then
-  apt_install_missing iproute2 || true
+  install_iproute_package || true
 fi
 
 if command -v modprobe >/dev/null 2>&1; then
@@ -337,10 +357,66 @@ should_use_mainline_bbr_fallback() {
     debian|ubuntu)
       return 1
       ;;
+  esac
+
+  if rpm_bbrplus_supported; then
+    return 1
+  fi
+
+  return 0
+}
+
+rpm_bbrplus_supported() {
+  local os_id
+  local os_version
+  local major
+  local arch
+
+  os_id="$(get_os_field ID || true)"
+  os_version="$(get_os_field VERSION_ID || true)"
+  major="${os_version%%.*}"
+  arch="$(uname -m)"
+
+  case "${os_id}" in
+    centos|rhel|rocky|almalinux|ol|oracle|cloudlinux)
+      ;;
     *)
-      return 0
+      return 1
       ;;
   esac
+
+  case "${major}" in
+    7)
+      [[ "${arch}" == "x86_64" ]]
+      return
+      ;;
+    8)
+      [[ "${arch}" == "x86_64" || "${arch}" == "aarch64" ]]
+      return
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+select_kernel_installer() {
+  local os_id
+
+  os_id="$(get_os_field ID || true)"
+  case "${os_id}" in
+    debian|ubuntu)
+      printf '%s\n' "install-bbrplus.sh"
+      return
+      ;;
+  esac
+
+  if rpm_bbrplus_supported; then
+    printf '%s\n' "install-bbrplus-rpm.sh"
+    return
+  fi
+
+  return 1
 }
 
 guard_supported_kernel_installer() {
@@ -354,8 +430,12 @@ guard_supported_kernel_installer() {
       ;;
   esac
 
+  if rpm_bbrplus_supported; then
+    return
+  fi
+
   os_pretty="$(get_os_field PRETTY_NAME || true)"
-  die "${os_pretty:-unsupported system} is not supported by the BBRplus kernel installer; only Debian/Ubuntu .deb installs are implemented"
+  die "${os_pretty:-unsupported system} is not supported by the BBRplus kernel installer; supported package targets are Debian/Ubuntu .deb and EL7/EL8 .rpm"
 }
 
 ensure_iproute2
@@ -393,8 +473,9 @@ if should_use_mainline_bbr_fallback; then
 fi
 
 guard_supported_kernel_installer
-log "installing BBRplus kernel first"
-if ! run_remote_script "install-bbrplus.sh" "${INSTALL_ARGS[@]}"; then
+INSTALL_SCRIPT="$(select_kernel_installer)"
+log "installing BBRplus kernel first with ${INSTALL_SCRIPT}"
+if ! run_remote_script "${INSTALL_SCRIPT}" "${INSTALL_ARGS[@]}"; then
   cleanup_boot_finalizer
   exit 1
 fi
